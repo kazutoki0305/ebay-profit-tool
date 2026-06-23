@@ -227,23 +227,30 @@ def product_input_page(client: Any | None, country: str, fee_setting: dict[str, 
     st.header("商品候補登録")
     st.caption("URLは保存するだけで、自動アクセスはしません。入力中に概算利益を表示します。")
 
-    name = st.text_input("商品名", placeholder="例: 和柄 小皿 5枚セット")
-    source_url = st.text_input("仕入れURL", placeholder="https://...")
-    purchase_price_jpy = st.number_input("仕入れ価格（円）", min_value=0, step=100, value=0)
-    domestic_shipping_jpy = st.number_input("国内送料（円）", min_value=0, step=100, value=0)
-    packaging_cost_jpy = st.number_input("梱包費（円）", min_value=0, step=50, value=100)
-    item_weight_g = st.number_input("商品重量（g）", min_value=0, step=10, value=0)
-    packed_weight_g = st.number_input("梱包後重量（g）", min_value=0, step=10, value=0)
-    length_cm = st.number_input("縦（cm）", min_value=0.0, step=0.5, value=0.0)
-    width_cm = st.number_input("横（cm）", min_value=0.0, step=0.5, value=0.0)
-    height_cm = st.number_input("高さ（cm）", min_value=0.0, step=0.5, value=0.0)
+    name = st.text_input("商品名", placeholder="例: 和柄 小皿 5枚セット", key="candidate_name")
+    source_url = st.text_input("仕入れURL", placeholder="https://...", key="candidate_source_url")
+    purchase_price_jpy = st.number_input("仕入れ価格（円）", min_value=0, step=100, value=0, key="candidate_purchase_price_jpy")
+    domestic_shipping_jpy = st.number_input("国内送料（円）", min_value=0, step=100, value=0, key="candidate_domestic_shipping_jpy")
+    packaging_cost_jpy = st.number_input("梱包費（円）", min_value=0, step=50, value=100, key="candidate_packaging_cost_jpy")
+    item_weight_g = st.number_input("商品重量（g）", min_value=0, step=10, value=0, key="candidate_item_weight_g")
+    packed_weight_g = st.number_input("梱包後重量（g）", min_value=0, step=10, value=0, key="candidate_packed_weight_g")
+    length_cm = st.number_input("縦（cm）", min_value=0.0, step=0.5, value=0.0, key="candidate_length_cm")
+    width_cm = st.number_input("横（cm）", min_value=0.0, step=0.5, value=0.0, key="candidate_width_cm")
+    height_cm = st.number_input("高さ（cm）", min_value=0.0, step=0.5, value=0.0, key="candidate_height_cm")
     currency = COUNTRY_CONFIG[country]["currency"]
-    expected_sale_price = st.number_input(f"想定販売価格（{currency}）", min_value=0.0, step=1.0, value=0.0)
-    sold_count_90d = st.number_input("想定Sold数（90日）", min_value=0, step=1, value=0)
-    competitor_count = st.number_input("競合数", min_value=0, step=1, value=0)
+    expected_sale_price = st.number_input(f"想定販売価格（{currency}）", min_value=0.0, step=1.0, value=0.0, key="candidate_expected_sale_price")
+    sold_count_90d = st.number_input("想定Sold数（90日）", min_value=0, step=1, value=0, key="candidate_sold_count_90d")
+    competitor_count = st.number_input("競合数", min_value=0, step=1, value=0, key="candidate_competitor_count")
     promoted_default = to_float(fee_setting.get("promoted_listing_default_percent"))
-    promoted_listing_percent = st.number_input("Promoted Listings率（%）", min_value=0.0, max_value=100.0, step=0.5, value=promoted_default)
-    category = st.text_input("商品カテゴリ", placeholder="例: Collectibles / Kitchen")
+    promoted_listing_percent = st.number_input(
+        "Promoted Listings率（%）",
+        min_value=0.0,
+        max_value=100.0,
+        step=0.5,
+        value=promoted_default,
+        key="candidate_promoted_listing_percent",
+    )
+    category = st.text_input("商品カテゴリ", placeholder="例: Collectibles / Kitchen", key="candidate_category")
 
     risk_flags: dict[str, bool] = {}
     st.markdown("#### リスクチェック")
@@ -253,7 +260,7 @@ def product_input_page(client: Any | None, country: str, fee_setting: dict[str, 
             for item in [risk for risk in RISK_FLAGS if risk["category"] == risk_category]:
                 risk_flags[item["key"]] = st.checkbox(item["label"], key=f"risk_{item['key']}")
 
-    memo = st.text_area("メモ", placeholder="目視で確認したSold状況、状態、注意点など")
+    memo = st.text_area("メモ", placeholder="目視で確認したSold状況、状態、注意点など", key="candidate_memo")
 
     candidate = {
         "name": name,
