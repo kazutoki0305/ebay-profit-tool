@@ -84,8 +84,10 @@ def require_login_if_needed() -> None:
     if st.session_state.get("authenticated"):
         return
     st.title("ログイン")
-    entered = st.text_input("パスワード", type="password")
-    if st.button("ログイン"):
+    with st.form("login_form"):
+        entered = st.text_input("パスワード", type="password")
+        submitted = st.form_submit_button("ログイン")
+    if submitted:
         if entered == password:
             st.session_state["authenticated"] = True
             st.rerun()
