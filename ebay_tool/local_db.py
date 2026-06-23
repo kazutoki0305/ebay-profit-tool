@@ -328,6 +328,27 @@ def upsert_row(table: str, payload: dict[str, Any], on_conflict: str | None = No
     return True
 
 
+def update_row(table: str, row_id: str, payload: dict[str, Any]) -> bool:
+    if table not in TABLE_COLUMNS:
+        return False
+    allowed = set(TABLE_COLUMNS[table])
+    row = {key: value for key, value in payload.items() if key in allowed and key != "id"}
+    if not row:
+        return True
+    for key in JSON_COLUMNS:
+        if key in row and not isinstance(row[key], str):
+            row[key] = json.dumps(row[key], ensure_ascii=False)
+    for key in BOOL_COLUMNS:
+        if key in row:
+            row[key] = 1 if row[key] else 0
+    keys = list(row.keys())
+    assignments = ", ".join(f"{key} = ?" for key in keys)
+    with connect() as conn:
+        conn.execute(f"update {table} set {assignments} where id = ?", [*[row[key] for key in keys], row_id])
+        conn.commit()
+    return True
+
+
 def delete_row(table: str, row_id: str) -> bool:
     if table not in TABLE_COLUMNS:
         return False
@@ -335,4 +356,3 @@ def delete_row(table: str, row_id: str) -> bool:
         conn.execute(f"delete from {table} where id = ?", [row_id])
         conn.commit()
     return True
-

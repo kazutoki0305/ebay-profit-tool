@@ -3,12 +3,10 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-import pandas as pd
 import streamlit as st
 
 from ebay_tool import local_db
 from ebay_tool.calculations import (
-    build_chatgpt_prompt,
     build_product_payload,
     calculate_fx_rate,
     calculate_profit,
@@ -23,11 +21,16 @@ from ebay_tool.constants import (
     DEFAULT_FEE_SETTINGS,
     DEFAULT_GRADING_RULES,
     DEFAULT_SHIPPING_RATES,
-    GRADE_ORDER,
-    RISK_FLAGS,
 )
-from ebay_tool.db import fetch_rows, get_supabase_client, insert_row, upsert_row
+from ebay_tool.db import fetch_rows, get_supabase_client, insert_row, update_row, upsert_row
 from ebay_tool.fx import build_fx_payload, fetch_rate_from_frankfurter
+
+
+COUNTRY_AU = "オーストラリア"
+COUNTRY_US = "アメリカ"
+COMPARISON_META_KEY = "_country_comparison"
+DEFAULT_PACKAGING_COST_JPY = 150
+DEFAULT_COMPARISON_WEIGHT_G = 500
 
 
 st.set_page_config(
@@ -71,6 +74,15 @@ def apply_mobile_css() -> None:
         .warn { background: #fff7d6; border-left: 5px solid #d9a400; padding: 0.7rem; border-radius: 6px; margin: 0.4rem 0; }
         .danger { background: #fde8e7; border-left: 5px solid #d93025; padding: 0.7rem; border-radius: 6px; margin: 0.4rem 0; }
         .ok { background: #e6f4ea; border-left: 5px solid #188038; padding: 0.7rem; border-radius: 6px; margin: 0.4rem 0; }
+        .summary-card {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 0.85rem;
+            margin: 0.5rem 0;
+            background: #fff;
+        }
+        .summary-label { color: #666; font-size: 0.85rem; margin-bottom: 0.15rem; }
+        .summary-value { font-size: 1.35rem; font-weight: 800; line-height: 1.25; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -223,176 +235,377 @@ def show_result_card(calculation: dict[str, Any]) -> None:
         st.markdown('<div class="ok">現時点の入力では大きな警告はありません。ただし最終判断前に公式情報を確認してください。</div>', unsafe_allow_html=True)
 
 
-def product_input_page(client: Any | None, country: str, fee_setting: dict[str, Any], shipping_rates: list[dict[str, Any]], grading_rule: dict[str, Any], fx_rate: dict[str, Any] | None) -> None:
-    st.header("商品候補登録")
-    st.caption("URLは保存するだけで、自動アクセスはしません。入力中に概算利益を表示します。")
+def load_country_contexts(client: Any | None) -> dict[str, dict[str, Any]]:
+    contexts: dict[str, dict[str, Any]] = {}
+    for country in [COUNTRY_AU, COUNTRY_US]:
+        config = COUNTRY_CONFIG[country]
+        fee_setting = load_fee_setting(client, country)
+        fx_rate = load_fx_rate(client, config["fx_base"], config["fx_target"], fee_setting)
+        if fx_rate:
+            expected_rate = calculate_fx_rate(to_float(fx_rate.get("raw_rate")), to_float(fee_setting.get("exchange_buffer_percent")))
+            if abs(expected_rate - to_float(fx_rate.get("calculation_rate"))) > 0.0001:
+                fx_rate = fx_rate.copy()
+                fx_rate["buffer_percent"] = to_float(fee_setting.get("exchange_buffer_percent"))
+                fx_rate["calculation_rate"] = expected_rate
+        contexts[country] = {
+            "config": config,
+            "fee_setting": fee_setting,
+            "grading_rule": load_grading_rule(client, country),
+            "shipping_rates": load_shipping_rates(client, country),
+            "fx_rate": fx_rate,
+        }
+    return contexts
 
-    name = st.text_input("商品名", placeholder="例: 和柄 小皿 5枚セット", key="candidate_name")
-    source_url = st.text_input("仕入れURL", placeholder="https://...", key="candidate_source_url")
-    purchase_price_jpy = st.number_input("仕入れ価格（円）", min_value=0, step=100, value=0, key="candidate_purchase_price_jpy")
-    domestic_shipping_jpy = st.number_input("国内送料（円）", min_value=0, step=100, value=0, key="candidate_domestic_shipping_jpy")
-    packaging_cost_jpy = st.number_input("梱包費（円）", min_value=0, step=50, value=100, key="candidate_packaging_cost_jpy")
-    item_weight_g = st.number_input("商品重量（g）", min_value=0, step=10, value=0, key="candidate_item_weight_g")
-    packed_weight_g = st.number_input("梱包後重量（g）", min_value=0, step=10, value=0, key="candidate_packed_weight_g")
-    length_cm = st.number_input("縦（cm）", min_value=0.0, step=0.5, value=0.0, key="candidate_length_cm")
-    width_cm = st.number_input("横（cm）", min_value=0.0, step=0.5, value=0.0, key="candidate_width_cm")
-    height_cm = st.number_input("高さ（cm）", min_value=0.0, step=0.5, value=0.0, key="candidate_height_cm")
-    currency = COUNTRY_CONFIG[country]["currency"]
-    expected_sale_price = st.number_input(f"想定販売価格（{currency}）", min_value=0.0, step=1.0, value=0.0, key="candidate_expected_sale_price")
-    sold_count_90d = st.number_input("想定Sold数（90日）", min_value=0, step=1, value=0, key="candidate_sold_count_90d")
-    competitor_count = st.number_input("競合数", min_value=0, step=1, value=0, key="candidate_competitor_count")
-    promoted_default = to_float(fee_setting.get("promoted_listing_default_percent"))
-    promoted_listing_percent = st.number_input(
-        "Promoted Listings率（%）",
-        min_value=0.0,
-        max_value=100.0,
-        step=0.5,
-        value=promoted_default,
-        key="candidate_promoted_listing_percent",
+
+def candidate_meta(row: dict[str, Any] | None) -> dict[str, Any]:
+    flags = (row or {}).get("risk_flags") or {}
+    meta = flags.get(COMPARISON_META_KEY) if isinstance(flags, dict) else None
+    meta = meta.copy() if isinstance(meta, dict) else {}
+    if row:
+        sale_currency = row.get("sale_currency")
+        if "expected_sale_price_aud" not in meta:
+            meta["expected_sale_price_aud"] = to_float(row.get("expected_sale_price")) if sale_currency == "AUD" else 0.0
+        if "expected_sale_price_usd" not in meta:
+            meta["expected_sale_price_usd"] = to_float(row.get("expected_sale_price")) if sale_currency == "USD" else 0.0
+    meta.setdefault("expected_sale_price_aud", 0.0)
+    meta.setdefault("expected_sale_price_usd", 0.0)
+    meta.setdefault("rights_brand_risk", "")
+    meta.setdefault("material_risk", "")
+    meta.setdefault("shipping_quarantine_risk", "")
+    meta.setdefault("deleted", False)
+    return meta
+
+
+def risk_flags_with_meta(row: dict[str, Any] | None, meta: dict[str, Any]) -> dict[str, Any]:
+    flags = ((row or {}).get("risk_flags") or {}).copy()
+    flags[COMPARISON_META_KEY] = meta
+    return flags
+
+
+def is_deleted_candidate(row: dict[str, Any]) -> bool:
+    return bool(candidate_meta(row).get("deleted"))
+
+
+def visible_products(client: Any | None) -> list[dict[str, Any]]:
+    return [row for row in load_products(client) if not is_deleted_candidate(row)]
+
+
+def simple_candidate_base(values: dict[str, Any], country: str, sale_price: float, contexts: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    fee_setting = contexts[country]["fee_setting"]
+    return {
+        "name": values.get("name", ""),
+        "source_url": "",
+        "purchase_price_jpy": to_int(values.get("purchase_price_jpy")),
+        "domestic_shipping_jpy": to_int(values.get("domestic_shipping_jpy")),
+        "packaging_cost_jpy": to_int(values.get("packaging_cost_jpy")),
+        "item_weight_g": 0,
+        "packed_weight_g": DEFAULT_COMPARISON_WEIGHT_G,
+        "length_cm": 0,
+        "width_cm": 0,
+        "height_cm": 0,
+        "destination_country": country,
+        "expected_sale_price": to_float(sale_price),
+        "sold_count_90d": 0,
+        "competitor_count": 0,
+        "promoted_listing_percent": to_float(fee_setting.get("promoted_listing_default_percent")),
+        "category": "",
+        "memo": values.get("memo", ""),
+        "risk_flags": {},
+    }
+
+
+def calculate_country_comparison(values: dict[str, Any], contexts: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    au_candidate = simple_candidate_base(values, COUNTRY_AU, values.get("expected_sale_price_aud"), contexts)
+    us_candidate = simple_candidate_base(values, COUNTRY_US, values.get("expected_sale_price_usd"), contexts)
+    au_calc = calculate_profit(
+        au_candidate,
+        contexts[COUNTRY_AU]["fee_setting"],
+        contexts[COUNTRY_AU]["fx_rate"],
+        contexts[COUNTRY_AU]["shipping_rates"],
+        contexts[COUNTRY_AU]["grading_rule"],
     )
-    category = st.text_input("商品カテゴリ", placeholder="例: Collectibles / Kitchen", key="candidate_category")
+    us_calc = calculate_profit(
+        us_candidate,
+        contexts[COUNTRY_US]["fee_setting"],
+        contexts[COUNTRY_US]["fx_rate"],
+        contexts[COUNTRY_US]["shipping_rates"],
+        contexts[COUNTRY_US]["grading_rule"],
+    )
+    au_profit = to_int(au_calc.get("expected_profit_jpy"), -10**9)
+    us_profit = to_int(us_calc.get("expected_profit_jpy"), -10**9)
+    both_d = au_calc.get("grade") == "D" and us_calc.get("grade") == "D"
+    recommended_country = COUNTRY_AU if au_profit >= us_profit else COUNTRY_US
+    recommended_calc = au_calc if recommended_country == COUNTRY_AU else us_calc
+    recommended_candidate = au_candidate if recommended_country == COUNTRY_AU else us_candidate
+    recommendation = "仕入れ非推奨" if both_d else recommended_country
+    return {
+        "au_candidate": au_candidate,
+        "us_candidate": us_candidate,
+        "au": au_calc,
+        "us": us_calc,
+        "recommended_country": recommended_country,
+        "recommended_label": recommendation,
+        "recommended_calc": recommended_calc,
+        "recommended_candidate": recommended_candidate,
+        "profit_difference": abs(au_profit - us_profit) if au_profit > -10**8 and us_profit > -10**8 else None,
+    }
 
-    risk_flags: dict[str, bool] = {}
-    st.markdown("#### リスクチェック")
-    categories = sorted({item["category"] for item in RISK_FLAGS})
-    for risk_category in categories:
-        with st.expander(risk_category, expanded=False):
-            for item in [risk for risk in RISK_FLAGS if risk["category"] == risk_category]:
-                risk_flags[item["key"]] = st.checkbox(item["label"], key=f"risk_{item['key']}")
 
-    memo = st.text_area("メモ", placeholder="目視で確認したSold状況、状態、注意点など", key="candidate_memo")
+def values_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    meta = candidate_meta(row)
+    return {
+        "name": row.get("name", ""),
+        "purchase_price_jpy": to_int(row.get("purchase_price_jpy")),
+        "domestic_shipping_jpy": to_int(row.get("domestic_shipping_jpy")),
+        "packaging_cost_jpy": to_int(row.get("packaging_cost_jpy"), DEFAULT_PACKAGING_COST_JPY),
+        "expected_sale_price_aud": to_float(meta.get("expected_sale_price_aud")),
+        "expected_sale_price_usd": to_float(meta.get("expected_sale_price_usd")),
+        "rights_brand_risk": str(meta.get("rights_brand_risk") or ""),
+        "material_risk": str(meta.get("material_risk") or ""),
+        "shipping_quarantine_risk": str(meta.get("shipping_quarantine_risk") or ""),
+        "memo": row.get("memo", "") or "",
+    }
 
-    candidate = {
+
+def meta_from_values(values: dict[str, Any], comparison: dict[str, Any], deleted: bool = False) -> dict[str, Any]:
+    return {
+        "expected_sale_price_aud": to_float(values.get("expected_sale_price_aud")),
+        "expected_sale_price_usd": to_float(values.get("expected_sale_price_usd")),
+        "rights_brand_risk": str(values.get("rights_brand_risk") or ""),
+        "material_risk": str(values.get("material_risk") or ""),
+        "shipping_quarantine_risk": str(values.get("shipping_quarantine_risk") or ""),
+        "recommended_label": comparison.get("recommended_label"),
+        "au_profit_jpy": comparison["au"].get("expected_profit_jpy"),
+        "us_profit_jpy": comparison["us"].get("expected_profit_jpy"),
+        "au_roi_percent": comparison["au"].get("roi_percent"),
+        "us_roi_percent": comparison["us"].get("roi_percent"),
+        "au_grade": comparison["au"].get("grade"),
+        "us_grade": comparison["us"].get("grade"),
+        "profit_difference_jpy": comparison.get("profit_difference"),
+        "deleted": deleted,
+    }
+
+
+def product_payload_from_values(values: dict[str, Any], comparison: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    candidate = comparison["recommended_candidate"].copy()
+    candidate["memo"] = values.get("memo", "")
+    payload = build_product_payload(candidate, comparison["recommended_calc"])
+    meta = meta_from_values(values, comparison, deleted=False)
+    payload["risk_flags"] = risk_flags_with_meta(existing, meta)
+    payload["grade"] = comparison["recommended_calc"].get("grade")
+    if comparison.get("recommended_label") == "仕入れ非推奨":
+        payload["grade"] = "D"
+    return payload
+
+
+def summary_value(label: str, value: str) -> None:
+    st.markdown(
+        f'<div class="summary-card"><div class="summary-label">{label}</div><div class="summary-value">{value}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def show_comparison_summary(comparison: dict[str, Any]) -> None:
+    st.subheader("判定結果")
+    summary_value("推奨販売国", str(comparison.get("recommended_label") or "-"))
+    col1, col2 = st.columns(2)
+    with col1:
+        summary_value("オーストラリア利益", yen(comparison["au"].get("expected_profit_jpy")))
+        summary_value("AU判定 / ROI", f"{comparison['au'].get('grade', '-')} / {pct(comparison['au'].get('roi_percent'))}")
+    with col2:
+        summary_value("アメリカ利益", yen(comparison["us"].get("expected_profit_jpy")))
+        summary_value("US判定 / ROI", f"{comparison['us'].get('grade', '-')} / {pct(comparison['us'].get('roi_percent'))}")
+    summary_value("利益差", yen(comparison.get("profit_difference")))
+
+
+def show_comparison_details(comparison: dict[str, Any]) -> None:
+    with st.expander("詳細な計算内訳", expanded=False):
+        st.markdown("#### オーストラリア")
+        show_result_card(comparison["au"])
+        st.markdown("#### アメリカ")
+        show_result_card(comparison["us"])
+
+
+def build_comparison_prompt(values: dict[str, Any], comparison: dict[str, Any]) -> str:
+    return f"""以下の商品を、eBay輸出初心者が少量仕入れしてよいか、利益・リスク・販売国の観点から厳しく判定してください。
+
+商品情報:
+- 商品名: {values.get("name", "")}
+- 仕入れ価格: {to_int(values.get("purchase_price_jpy")):,}円
+- 国内送料: {to_int(values.get("domestic_shipping_jpy")):,}円
+- 梱包費: {to_int(values.get("packaging_cost_jpy")):,}円
+- AUD想定販売価格: {to_float(values.get("expected_sale_price_aud"))}
+- USD想定販売価格: {to_float(values.get("expected_sale_price_usd"))}
+
+利益比較:
+- オーストラリア向け想定利益: {yen(comparison["au"].get("expected_profit_jpy"))}
+- オーストラリア向けROI: {pct(comparison["au"].get("roi_percent"))}
+- オーストラリア向け判定: {comparison["au"].get("grade", "-")}
+- アメリカ向け想定利益: {yen(comparison["us"].get("expected_profit_jpy"))}
+- アメリカ向けROI: {pct(comparison["us"].get("roi_percent"))}
+- アメリカ向け判定: {comparison["us"].get("grade", "-")}
+- 推奨販売国: {comparison.get("recommended_label") or "-"}
+- 利益差: {yen(comparison.get("profit_difference"))}
+
+補足リスク:
+- 権利・ブランドリスク: {values.get("rights_brand_risk") or "未記入"}
+- 素材リスク: {values.get("material_risk") or "未記入"}
+- 配送・検疫リスク: {values.get("shipping_quarantine_risk") or "未記入"}
+- メモ: {values.get("memo") or "未記入"}
+
+依頼:
+この商品を初心者が少量仕入れしてよいか、利益・リスク・販売国の観点から厳しく判定してください。見送るべき条件と、確認すべき公式情報も具体的に挙げてください。
+"""
+
+
+def render_candidate_form(
+    client: Any | None,
+    contexts: dict[str, dict[str, Any]],
+    *,
+    existing: dict[str, Any] | None = None,
+    key_prefix: str = "new",
+) -> None:
+    base = values_from_row(existing) if existing else {
+        "name": "",
+        "purchase_price_jpy": 0,
+        "domestic_shipping_jpy": 0,
+        "packaging_cost_jpy": to_int(st.session_state.get("default_packaging_cost_jpy"), DEFAULT_PACKAGING_COST_JPY),
+        "expected_sale_price_aud": 0.0,
+        "expected_sale_price_usd": 0.0,
+        "rights_brand_risk": "",
+        "material_risk": "",
+        "shipping_quarantine_risk": "",
+        "memo": "",
+    }
+
+    st.markdown("#### 入力")
+    name = st.text_input("商品名", value=base["name"], key=f"{key_prefix}_name")
+    purchase_price_jpy = st.number_input("仕入れ価格（円）", min_value=0, step=100, value=to_int(base["purchase_price_jpy"]), key=f"{key_prefix}_purchase")
+    domestic_shipping_jpy = st.number_input("国内送料（円）", min_value=0, step=100, value=to_int(base["domestic_shipping_jpy"]), key=f"{key_prefix}_domestic")
+    expected_sale_price_aud = st.number_input("想定販売価格 AUD", min_value=0.0, step=1.0, value=to_float(base["expected_sale_price_aud"]), key=f"{key_prefix}_aud")
+    expected_sale_price_usd = st.number_input("想定販売価格 USD", min_value=0.0, step=1.0, value=to_float(base["expected_sale_price_usd"]), key=f"{key_prefix}_usd")
+    packaging_cost_jpy = st.number_input("梱包費（円）", min_value=0, step=50, value=to_int(base["packaging_cost_jpy"], DEFAULT_PACKAGING_COST_JPY), key=f"{key_prefix}_packaging")
+    rights_brand_risk = st.text_area("権利・ブランドリスク", value=base["rights_brand_risk"], key=f"{key_prefix}_rights")
+    material_risk = st.text_area("素材リスク", value=base["material_risk"], key=f"{key_prefix}_material")
+    shipping_quarantine_risk = st.text_area("配送・検疫リスク", value=base["shipping_quarantine_risk"], key=f"{key_prefix}_shipping_risk")
+    memo = st.text_area("メモ", value=base["memo"], key=f"{key_prefix}_memo")
+
+    values = {
         "name": name,
-        "source_url": source_url,
         "purchase_price_jpy": purchase_price_jpy,
         "domestic_shipping_jpy": domestic_shipping_jpy,
         "packaging_cost_jpy": packaging_cost_jpy,
-        "item_weight_g": item_weight_g,
-        "packed_weight_g": packed_weight_g,
-        "length_cm": length_cm,
-        "width_cm": width_cm,
-        "height_cm": height_cm,
-        "destination_country": country,
-        "expected_sale_price": expected_sale_price,
-        "sold_count_90d": sold_count_90d,
-        "competitor_count": competitor_count,
-        "promoted_listing_percent": promoted_listing_percent,
-        "category": category,
+        "expected_sale_price_aud": expected_sale_price_aud,
+        "expected_sale_price_usd": expected_sale_price_usd,
+        "rights_brand_risk": rights_brand_risk,
+        "material_risk": material_risk,
+        "shipping_quarantine_risk": shipping_quarantine_risk,
         "memo": memo,
-        "risk_flags": risk_flags,
     }
-    calculation = calculate_profit(candidate, fee_setting, fx_rate, shipping_rates, grading_rule)
-    show_result_card(calculation)
+    comparison = calculate_country_comparison(values, contexts)
+    show_comparison_summary(comparison)
+    show_comparison_details(comparison)
 
-    if st.button("この候補を保存", type="primary"):
+    button_label = "変更を保存" if existing else "この候補を保存"
+    if st.button(button_label, type="primary", key=f"{key_prefix}_save"):
         if not name.strip():
             st.error("商品名を入力してください。")
+            return
+        payload = product_payload_from_values(values, comparison, existing)
+        if existing:
+            payload["updated_at"] = now_iso()
+            ok = update_row(client, "product_candidates", str(existing.get("id")), payload)
         else:
-            payload = build_product_payload(candidate, calculation)
-            payload["created_at"] = now_iso()
-            if insert_row(client, "product_candidates", payload):
-                st.success("商品候補を保存しました。")
-                st.rerun()
+            ok = insert_row(client, "product_candidates", payload)
+        if ok:
+            st.success("商品候補を保存しました。")
+            st.session_state.pop("editing_candidate_id", None)
+            st.rerun()
 
 
-def dashboard_page(client: Any | None, country: str, fee_setting: dict[str, Any], shipping_rates: list[dict[str, Any]], grading_rule: dict[str, Any], fx_rate: dict[str, Any] | None) -> None:
-    st.header("ダッシュボード")
-    products = load_products(client)
-    country_products = [row for row in products if row.get("destination_country") == country]
-
-    col1, col2 = st.columns(2)
-    col1.metric("登録候補数", len(country_products))
-    for grade in ["A", "B", "C", "D"]:
-        col = col1 if grade in {"A", "C"} else col2
-        col.metric(f"{grade}判定数", sum(1 for row in country_products if row.get("grade") == grade))
-
-    valid_profit = [row for row in country_products if row.get("expected_profit_jpy") is not None]
-    if valid_profit:
-        best_profit = max(valid_profit, key=lambda row: to_int(row.get("expected_profit_jpy")))
-        best_roi = max(valid_profit, key=lambda row: to_float(row.get("roi_percent")))
-        st.markdown("#### 注目候補")
-        st.write(f"最高利益候補: {best_profit.get('name')} / {yen(best_profit.get('expected_profit_jpy'))}")
-        st.write(f"最高ROI候補: {best_roi.get('name')} / {pct(best_roi.get('roi_percent'))}")
-    else:
-        st.info("まだ利益計算済みの商品候補がありません。")
-
-    st.markdown("#### マスタ・為替")
-    st.write(f"手数料マスタ最終確認日: {fee_setting.get('last_checked_at') or '未登録'}")
-    last_shipping_checked = max([row.get("last_checked_at") or "" for row in shipping_rates], default="")
-    st.write(f"送料マスタ最終確認日: {last_shipping_checked or '未登録'}")
-    st.write(f"為替最終取得日時: {(fx_rate or {}).get('fetched_at') or '未取得'}")
-    show_master_warnings(fee_setting, shipping_rates, grading_rule)
+def product_judgment_page(client: Any | None, contexts: dict[str, dict[str, Any]]) -> None:
+    st.header("商品判定")
+    st.caption("1つの商品で、オーストラリア向けとアメリカ向けの利益を同時に比較します。")
+    render_candidate_form(client, contexts, key_prefix="new")
 
 
-def products_page(client: Any | None, country: str) -> None:
+def card_updated_label(row: dict[str, Any]) -> str:
+    value = row.get("updated_at") or row.get("created_at") or ""
+    return str(value).split("T")[0] if value else "-"
+
+
+def render_candidate_detail(row: dict[str, Any], values: dict[str, Any], comparison: dict[str, Any]) -> None:
+    show_comparison_summary(comparison)
+    st.markdown("#### 補足メモ")
+    st.write(f"権利・ブランドリスク: {values.get('rights_brand_risk') or '未記入'}")
+    st.write(f"素材リスク: {values.get('material_risk') or '未記入'}")
+    st.write(f"配送・検疫リスク: {values.get('shipping_quarantine_risk') or '未記入'}")
+    st.write(f"メモ: {values.get('memo') or '未記入'}")
+    show_comparison_details(comparison)
+
+
+def products_page(client: Any | None, contexts: dict[str, dict[str, Any]]) -> None:
     st.header("候補一覧")
-    products = load_products(client)
+    products = visible_products(client)
     if not products:
         st.info("保存済みの商品候補がありません。")
         return
 
-    country_filter = st.selectbox("販売国で絞り込み", ["すべて", "アメリカ", "オーストラリア"], index=COUNTRY_OPTIONS.index(country) + 1)
-    grade_filter = st.selectbox("判定で絞り込み", ["すべて", "Aのみ", "B以上", "C以下", "高リスク除外"])
-    sort_by = st.selectbox("並び替え", ["判定順", "利益順", "ROI順", "登録日順", "リスク低い順"])
+    sort_by = st.selectbox("並び替え", ["優先度順", "利益差順", "更新日順"])
+    prepared = []
+    for row in products:
+        values = values_from_row(row)
+        comparison = calculate_country_comparison(values, contexts)
+        prepared.append((row, values, comparison))
+    if sort_by == "優先度順":
+        prepared.sort(key=lambda item: max(to_int(item[2]["au"].get("expected_profit_jpy")), to_int(item[2]["us"].get("expected_profit_jpy"))), reverse=True)
+    elif sort_by == "利益差順":
+        prepared.sort(key=lambda item: to_int(item[2].get("profit_difference")), reverse=True)
+    else:
+        prepared.sort(key=lambda item: item[0].get("updated_at") or item[0].get("created_at") or "", reverse=True)
 
-    filtered = products
-    if country_filter != "すべて":
-        filtered = [row for row in filtered if row.get("destination_country") == country_filter]
-    if grade_filter == "Aのみ":
-        filtered = [row for row in filtered if row.get("grade") == "A"]
-    elif grade_filter == "B以上":
-        filtered = [row for row in filtered if row.get("grade") in {"A", "B"}]
-    elif grade_filter == "C以下":
-        filtered = [row for row in filtered if row.get("grade") in {"C", "D", "送料未登録", "未計算"}]
-    elif grade_filter == "高リスク除外":
-        filtered = [row for row in filtered if to_int(row.get("risk_score")) <= 8]
+    st.caption(f"{len(prepared)}件表示")
+    for row, values, comparison in prepared:
+        row_id = str(row.get("id"))
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(f"### {values.get('name') or '名称未設定'}")
+        st.write(f"仕入れ価格: {yen(values.get('purchase_price_jpy'))}")
+        st.write(f"推奨販売国: {comparison.get('recommended_label')}")
+        st.write(f"オーストラリア利益: {yen(comparison['au'].get('expected_profit_jpy'))} / 判定 {comparison['au'].get('grade', '-')}")
+        st.write(f"アメリカ利益: {yen(comparison['us'].get('expected_profit_jpy'))} / 判定 {comparison['us'].get('grade', '-')}")
+        st.write(f"更新日: {card_updated_label(row)}")
+        col1, col2 = st.columns(2)
+        if col1.button("詳細", key=f"detail_{row_id}"):
+            st.session_state["detail_candidate_id"] = row_id
+        if col2.button("編集", key=f"edit_{row_id}"):
+            st.session_state["editing_candidate_id"] = row_id
+        col3, col4 = st.columns(2)
+        if col3.button("削除", key=f"delete_{row_id}"):
+            st.session_state["delete_candidate_id"] = row_id
+        if col4.button("ChatGPT精査プロンプト", key=f"prompt_{row_id}"):
+            st.session_state["prompt_candidate_id"] = row_id
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    if sort_by == "判定順":
-        filtered = sorted(filtered, key=lambda row: GRADE_ORDER.get(row.get("grade"), 99))
-    elif sort_by == "利益順":
-        filtered = sorted(filtered, key=lambda row: to_int(row.get("expected_profit_jpy")), reverse=True)
-    elif sort_by == "ROI順":
-        filtered = sorted(filtered, key=lambda row: to_float(row.get("roi_percent")), reverse=True)
-    elif sort_by == "登録日順":
-        filtered = sorted(filtered, key=lambda row: row.get("created_at") or "", reverse=True)
-    elif sort_by == "リスク低い順":
-        filtered = sorted(filtered, key=lambda row: to_int(row.get("risk_score")))
-
-    st.caption(f"{len(filtered)}件表示")
-    for row in filtered:
-        with st.container():
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown(f"### {row.get('name') or '名称未設定'}")
-            grade_badge(row.get("grade", "未計算"))
-            st.write(f"販売国: {row.get('destination_country')}")
-            st.write(f"想定利益: {yen(row.get('expected_profit_jpy'))} / ROI: {pct(row.get('roi_percent'))}")
-            st.write(f"仕入れ価格: {yen(row.get('purchase_price_jpy'))} / 想定販売価格: {row.get('expected_sale_price')} {row.get('sale_currency')}")
-            st.write(f"リスクスコア: {row.get('risk_score', 0)} / 更新日: {row.get('updated_at') or row.get('created_at')}")
-            warnings = row.get("warnings") or []
-            if warnings:
-                st.caption("警告: " + " / ".join(warnings[:2]))
-            st.markdown("</div>", unsafe_allow_html=True)
-
-
-def result_page(client: Any | None) -> None:
-    st.header("利益計算結果")
-    products = load_products(client)
-    if not products:
-        st.info("保存済みの商品候補がありません。商品候補登録画面で入力すると、入力中の概算結果も表示されます。")
-        return
-
-    labels = [f"{row.get('name') or '名称未設定'} / {row.get('destination_country')} / {row.get('grade')}" for row in products]
-    selected_index = st.selectbox("商品候補を選択", range(len(products)), format_func=lambda idx: labels[idx])
-    product = products[selected_index]
-    product_country = product.get("destination_country") or "アメリカ"
-    product_config = COUNTRY_CONFIG[product_country]
-    fee_setting = load_fee_setting(client, product_country)
-    grading_rule = load_grading_rule(client, product_country)
-    shipping_rates = load_shipping_rates(client, product_country)
-    fx_rate = load_fx_rate(client, product_config["fx_base"], product_config["fx_target"], fee_setting)
-    calculation = calculate_profit(product, fee_setting, fx_rate, shipping_rates, grading_rule)
-    show_result_card(calculation)
+        if st.session_state.get("detail_candidate_id") == row_id:
+            render_candidate_detail(row, values, comparison)
+        if st.session_state.get("prompt_candidate_id") == row_id:
+            st.text_area("コピー用プロンプト", value=build_comparison_prompt(values, comparison), height=420, key=f"prompt_text_{row_id}")
+        if st.session_state.get("delete_candidate_id") == row_id:
+            st.warning("この候補を削除しますか？")
+            dcol1, dcol2 = st.columns(2)
+            if dcol1.button("削除する", key=f"confirm_delete_{row_id}", type="primary"):
+                meta = candidate_meta(row)
+                meta["deleted"] = True
+                if update_row(client, "product_candidates", row_id, {"updated_at": now_iso(), "risk_flags": risk_flags_with_meta(row, meta)}):
+                    st.success("候補を削除しました。")
+                    st.session_state.pop("delete_candidate_id", None)
+                    st.rerun()
+            if dcol2.button("キャンセル", key=f"cancel_delete_{row_id}"):
+                st.session_state.pop("delete_candidate_id", None)
+                st.rerun()
+        if st.session_state.get("editing_candidate_id") == row_id:
+            st.markdown("#### 編集")
+            render_candidate_form(client, contexts, existing=row, key_prefix=f"edit_{row_id}")
 
 
 def fx_page(client: Any | None, country: str, fee_setting: dict[str, Any], fx_rate: dict[str, Any] | None) -> None:
@@ -551,24 +764,40 @@ def grading_master_form(client: Any | None, country: str, grading_rule: dict[str
             st.rerun()
 
 
-def master_page(client: Any | None, country: str, fee_setting: dict[str, Any], shipping_rates: list[dict[str, Any]], grading_rule: dict[str, Any]) -> None:
-    st.header("マスタ管理")
-    st.caption("手数料・送料・判定基準は自動更新しません。公式情報を確認した日付を保存してください。")
-    fee_master_form(client, country, fee_setting)
-    shipping_master_form(client, country, shipping_rates)
-    grading_master_form(client, country, grading_rule)
+def settings_page(client: Any | None, country: str, contexts: dict[str, dict[str, Any]]) -> None:
+    st.header("設定")
+    st.caption("通常の仕入れ判断では触らなくてよい項目です。公式情報を確認したときだけ更新してください。")
+    context = contexts[country]
 
+    with st.expander("注意書き・マスタ最終更新日", expanded=True):
+        st.warning("このツールは利益予測用です。最終判断前にeBay公式手数料、配送会社公式料金、配送可否、関税、DDP、検疫、規約適合性を確認してください。")
+        st.write(f"設定対象国: {country}")
+        st.write(f"手数料マスタ最終確認日: {context['fee_setting'].get('last_checked_at') or '未登録'}")
+        last_shipping_checked = max([row.get("last_checked_at") or "" for row in context["shipping_rates"]], default="")
+        st.write(f"送料マスタ最終確認日: {last_shipping_checked or '未登録'}")
+        st.write(f"為替最終取得日時: {(context['fx_rate'] or {}).get('fetched_at') or '未取得'}")
+        show_master_warnings(context["fee_setting"], context["shipping_rates"], context["grading_rule"])
 
-def prompt_page(client: Any | None) -> None:
-    st.header("ChatGPT精査プロンプト生成")
-    products = load_products(client)
-    if not products:
-        st.info("保存済みの商品候補がありません。先に商品候補を保存してください。")
-        return
-    labels = [f"{row.get('name') or '名称未設定'} / {row.get('destination_country')} / {row.get('grade')}" for row in products]
-    selected_index = st.selectbox("商品候補を選択", range(len(products)), format_func=lambda idx: labels[idx])
-    prompt = build_chatgpt_prompt(products[selected_index])
-    st.text_area("コピー用プロンプト", value=prompt, height=520)
+    with st.expander("梱包費デフォルト設定", expanded=False):
+        st.session_state["default_packaging_cost_jpy"] = st.number_input(
+            "新規登録時の梱包費（円）",
+            min_value=0,
+            step=50,
+            value=to_int(st.session_state.get("default_packaging_cost_jpy"), DEFAULT_PACKAGING_COST_JPY),
+        )
+
+    with st.expander("為替更新", expanded=False):
+        fx_page(client, country, context["fee_setting"], context["fx_rate"])
+
+    with st.expander("手数料マスタ", expanded=False):
+        fee_master_form(client, country, context["fee_setting"])
+
+    with st.expander("送料マスタ", expanded=False):
+        shipping_master_form(client, country, context["shipping_rates"])
+
+    with st.expander("判定基準", expanded=False):
+        st.caption("現在の判定は利益額のみを使います。ROIとSold数は判定に使いません。C判定の下限はD除外利益基準です。")
+        grading_master_form(client, country, context["grading_rule"])
 
 
 def main() -> None:
@@ -581,41 +810,27 @@ def main() -> None:
     if client is None:
         st.info(f"Supabase未設定のため、このPC内に保存します。保存先: {local_db.get_db_path()}")
 
-    country = st.selectbox("販売国", COUNTRY_OPTIONS, key="destination_country")
+    country = st.selectbox(
+        "基準販売国",
+        COUNTRY_OPTIONS,
+        index=COUNTRY_OPTIONS.index(COUNTRY_AU),
+        key="destination_country",
+    )
     config = COUNTRY_CONFIG[country]
-    st.caption(f"販売通貨: {config['currency']} / 使用為替: {config['fx_base']}/{config['fx_target']} / 注意: {config['risk_notice']}")
-
-    fee_setting = load_fee_setting(client, country)
-    grading_rule = load_grading_rule(client, country)
-    shipping_rates = load_shipping_rates(client, country)
-    fx_rate = load_fx_rate(client, config["fx_base"], config["fx_target"], fee_setting)
-
-    if fx_rate:
-        expected_rate = calculate_fx_rate(to_float(fx_rate.get("raw_rate")), to_float(fee_setting.get("exchange_buffer_percent")))
-        if abs(expected_rate - to_float(fx_rate.get("calculation_rate"))) > 0.0001:
-            fx_rate = fx_rate.copy()
-            fx_rate["buffer_percent"] = to_float(fee_setting.get("exchange_buffer_percent"))
-            fx_rate["calculation_rate"] = expected_rate
+    st.caption(f"基準表示: {country} / {config['currency']} / {config['fx_base']}/{config['fx_target']}")
+    contexts = load_country_contexts(client)
 
     page = st.selectbox(
         "画面",
-        ["ダッシュボード", "商品候補登録", "利益計算結果", "候補一覧", "マスタ管理", "為替更新", "ChatGPT精査プロンプト生成"],
+        ["商品判定", "候補一覧", "設定"],
     )
 
-    if page == "ダッシュボード":
-        dashboard_page(client, country, fee_setting, shipping_rates, grading_rule, fx_rate)
-    elif page == "商品候補登録":
-        product_input_page(client, country, fee_setting, shipping_rates, grading_rule, fx_rate)
-    elif page == "利益計算結果":
-        result_page(client)
+    if page == "商品判定":
+        product_judgment_page(client, contexts)
     elif page == "候補一覧":
-        products_page(client, country)
-    elif page == "マスタ管理":
-        master_page(client, country, fee_setting, shipping_rates, grading_rule)
-    elif page == "為替更新":
-        fx_page(client, country, fee_setting, fx_rate)
-    elif page == "ChatGPT精査プロンプト生成":
-        prompt_page(client)
+        products_page(client, contexts)
+    elif page == "設定":
+        settings_page(client, country, contexts)
 
 
 if __name__ == "__main__":

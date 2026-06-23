@@ -156,40 +156,17 @@ def grade_candidate(
     packed_weight_g: int,
     rules: dict[str, Any],
 ) -> tuple[str, str]:
-    d_profit = to_int(rules.get("grade_d_max_profit_jpy"), 500)
-    d_roi = to_float(rules.get("grade_d_max_roi_percent"), 15)
-
-    if expected_profit_jpy < 0:
-        return "D", "想定赤字のため仕入れ不可です。"
-    if expected_profit_jpy < d_profit:
-        return "D", f"利益が{d_profit:,}円未満のため安全側でD判定です。"
-    if roi_percent < d_roi:
-        return "D", f"ROIが{d_roi:.1f}%未満のため安全側でD判定です。"
-    if severe_risk_labels:
-        return "D", "高リスク項目があるため、利益が出てもD判定です。"
-    if risk_level == "high" or high_risk_labels:
-        return "C", "高めのリスクがあるため追加調査が必要です。"
-
     a_profit = to_int(rules.get("grade_a_min_profit_jpy"), 1000)
-    a_roi = to_float(rules.get("grade_a_min_roi_percent"), 30)
-    a_sold = to_int(rules.get("grade_a_min_sold_count"), 3)
     b_profit = to_int(rules.get("grade_b_min_profit_jpy"), 700)
-    b_roi = to_float(rules.get("grade_b_min_roi_percent"), 20)
-    b_sold = to_int(rules.get("grade_b_min_sold_count"), 1)
+    c_profit = to_int(rules.get("grade_d_max_profit_jpy"), 500)
 
-    if (
-        expected_profit_jpy >= a_profit
-        and roi_percent >= a_roi
-        and sold_count_90d >= a_sold
-        and risk_level == "low"
-        and packed_weight_g <= 1000
-    ):
-        return "A", "利益・ROI・Sold実績・リスクが揃っています。小ロット仕入れ候補です。"
-
-    if expected_profit_jpy >= b_profit and roi_percent >= b_roi and sold_count_90d >= b_sold and risk_level in {"low", "medium"}:
-        return "B", "少量で検証するなら候補になります。公式情報と実Soldの目視確認をしてください。"
-
-    return "C", "利益、ROI、Sold実績、またはリスクに弱い点があります。追加調査が必要です。"
+    if expected_profit_jpy >= a_profit:
+        return "A", f"想定利益が{a_profit:,}円以上です。利益水準は良好です。"
+    if expected_profit_jpy >= b_profit:
+        return "B", f"想定利益が{b_profit:,}円以上です。少量検証の候補です。"
+    if expected_profit_jpy >= c_profit:
+        return "C", f"想定利益が{c_profit:,}円以上です。優先度は低めです。"
+    return "D", f"想定利益が{c_profit:,}円未満、または赤字のため仕入れ非推奨です。"
 
 
 def calculate_profit(
@@ -429,4 +406,3 @@ def build_chatgpt_prompt(product: dict[str, Any]) -> str:
 3. 配送・検疫・商標・真贋・返品のリスクを確認してください。
 4. 仕入れる場合の最大仕入れ価格と、見送るべき条件を具体的に出してください。
 """
-

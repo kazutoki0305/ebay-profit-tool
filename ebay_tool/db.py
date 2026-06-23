@@ -144,6 +144,19 @@ def insert_row(client: Any | None, table: str, payload: dict[str, Any]) -> bool:
         return False
 
 
+def update_row(client: Any | None, table: str, row_id: str, payload: dict[str, Any]) -> bool:
+    if client is None:
+        return local_db.update_row(table, row_id, payload)
+    physical_table = supabase_table_name(table)
+    try:
+        client.table(physical_table).update(payload).eq("id", row_id).execute()
+        return True
+    except Exception as exc:
+        st.error(f"{physical_table} の更新に失敗しました。入力値とSupabase権限を確認してください。")
+        st.session_state["last_db_error"] = str(exc)
+        return False
+
+
 def delete_row(client: Any | None, table: str, row_id: str) -> bool:
     if client is None:
         return local_db.delete_row(table, row_id)
