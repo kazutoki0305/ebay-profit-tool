@@ -16,18 +16,47 @@ def _clean_secret_value(value: Any) -> str | None:
     return text or None
 
 
+def _read_mapping_value(mapping: Any, key: str) -> Any | None:
+    try:
+        return mapping[key]
+    except Exception:
+        pass
+    try:
+        return mapping.get(key)
+    except Exception:
+        pass
+    try:
+        return getattr(mapping, key)
+    except Exception:
+        return None
+
+
 def get_secret_value(*names: str) -> str | None:
+    try:
+        secrets_dict = st.secrets.to_dict()
+    except Exception:
+        secrets_dict = {}
+
     for name in names:
         try:
             if "." in name:
                 section, key = name.split(".", 1)
-                if section in st.secrets and key in st.secrets[section]:
-                    return _clean_secret_value(st.secrets[section][key])
+                section_value = _read_mapping_value(st.secrets, section)
+                value = _clean_secret_value(_read_mapping_value(section_value, key))
+                if value:
+                    return value
+                value = _clean_secret_value(_read_mapping_value(secrets_dict.get(section, {}), key))
+                if value:
+                    return value
         except Exception:
             pass
         try:
-            if name in st.secrets:
-                return _clean_secret_value(st.secrets[name])
+            value = _clean_secret_value(_read_mapping_value(st.secrets, name))
+            if value:
+                return value
+            value = _clean_secret_value(_read_mapping_value(secrets_dict, name))
+            if value:
+                return value
         except Exception:
             pass
     for name in names:
