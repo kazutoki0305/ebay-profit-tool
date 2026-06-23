@@ -26,7 +26,7 @@ from ebay_tool.constants import (
     GRADE_ORDER,
     RISK_FLAGS,
 )
-from ebay_tool.db import fetch_rows, get_secret_value, get_supabase_client, insert_row, upsert_row
+from ebay_tool.db import fetch_rows, get_supabase_client, insert_row, upsert_row
 from ebay_tool.fx import build_fx_payload, fetch_rate_from_frankfurter
 
 
@@ -75,25 +75,6 @@ def apply_mobile_css() -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-def require_login_if_needed() -> None:
-    password = get_secret_value("APP_LOGIN_PASSWORD", "app.login_password")
-    if not password:
-        return
-    if st.session_state.get("authenticated"):
-        return
-    st.title("ログイン")
-    with st.form("login_form"):
-        entered = st.text_input("パスワード", type="password")
-        submitted = st.form_submit_button("ログイン")
-    if submitted:
-        if entered == password:
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("パスワードが違います。")
-    st.stop()
 
 
 def yen(value: Any) -> str:
@@ -585,7 +566,6 @@ def prompt_page(client: Any | None) -> None:
 
 def main() -> None:
     apply_mobile_css()
-    require_login_if_needed()
 
     st.title("eBay仕入れ判定・利益計算")
     st.warning("このツールは利益予測用です。最終判断前にeBay公式手数料、配送会社公式料金、配送可否、関税、DDP、検疫、規約適合性を確認してください。")
