@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import streamlit as st
@@ -8,17 +9,35 @@ from . import local_db
 from .table_names import supabase_table_name
 
 
+def _clean_secret_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def get_secret_value(*names: str) -> str | None:
-    try:
-        for name in names:
+    for name in names:
+        try:
             if "." in name:
                 section, key = name.split(".", 1)
                 if section in st.secrets and key in st.secrets[section]:
-                    return st.secrets[section][key]
+                    return _clean_secret_value(st.secrets[section][key])
+        except Exception:
+            pass
+        try:
             if name in st.secrets:
-                return st.secrets[name]
-    except Exception:
-        return None
+                return _clean_secret_value(st.secrets[name])
+        except Exception:
+            pass
+    for name in names:
+        env_names = [name]
+        if "." in name:
+            env_names.append(name.replace(".", "_").upper())
+        for env_name in env_names:
+            value = _clean_secret_value(os.environ.get(env_name))
+            if value:
+                return value
     return None
 
 
