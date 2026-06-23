@@ -78,7 +78,7 @@ def apply_mobile_css() -> None:
 
 
 def require_login_if_needed() -> None:
-    password = get_secret_value("app.login_password", "APP_LOGIN_PASSWORD")
+    password = get_secret_value("APP_LOGIN_PASSWORD", "app.login_password")
     if not password:
         return
     if st.session_state.get("authenticated"):
