@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from html import escape
 from typing import Any
 
 import streamlit as st
@@ -31,6 +32,94 @@ COUNTRY_US = "アメリカ"
 COMPARISON_META_KEY = "_country_comparison"
 DEFAULT_PACKAGING_COST_JPY = 150
 DEFAULT_COMPARISON_WEIGHT_G = 500
+STORE_CHECK_NOTICE = (
+    "店頭チェック：偽物・非公式・素材不明・食品・液体・香り付き・電池入り・"
+    "植物/動物/木竹素材・重い/大きい/壊れやすい商品は保留。判断に迷うものは仕入れない。"
+)
+
+RISK_GUIDE_SECTIONS = [
+    {
+        "title": "権利・ブランドリスク",
+        "red": [
+            "偽物、コピー品、レプリカ、非公式グッズに見える",
+            "パッケージや印刷が粗く、正規品に見えない",
+            "メーカー名、JAN、型番、販売元表記がないキャラクター商品",
+            "「〇〇風」「〇〇タイプ」「互換」「パロディ」表記がある",
+            "ブランドロゴやキャラクターだけを付けたノーブランド品に見える",
+            "海賊版ゲーム、コピーソフト、改造ROM、改造カートリッジに見える",
+            "ダウンロードコード、アカウント、デジタル商品である",
+            "フリマ・個人出品など、真贋確認が弱い仕入れ元の商品",
+        ],
+        "yellow": [
+            "ディズニー、ジブリ、ポケモン、マリオ、サンリオなどの有名IP公式品",
+            "任天堂、ソニー、バンダイ、タカラトミーなどの有名メーカー品",
+            "日本限定、非売品、ノベルティ、キャンペーン品",
+            "正規品に見えるが、JAN・型番・メーカー名が見つけにくい",
+            "中古ゲーム、中古ソフト、中古DVDなど、動作・地域・言語説明が必要な商品",
+            "商品名にキャラクター名やブランド名を入れないと売れなさそうな商品",
+        ],
+        "note": (
+            "有名IP・キャラクター商品であること自体は販売不可ではない。ただし、初心者の少額仕入れでは"
+            "真贋・権利者申立・説明ミスのリスクがあるため、公式品でもいったん保留扱いにする。"
+        ),
+    },
+    {
+        "title": "素材リスク",
+        "red": [
+            "食品、飲料、茶葉、粉末、サプリ、調味料",
+            "種、豆、穀物、木の実が入っている",
+            "ドライフラワー、押し花、植物片、葉、枝、草、苔が入っている",
+            "土、砂、泥、ほこり、虫、カビが付いている",
+            "木、竹、藁、籐、コルク、未加工っぽい自然素材が使われている",
+            "革、毛皮、羽、骨、角、貝殻など動物由来素材が使われている",
+            "香水、アロマ、液体、スプレー、アルコール類",
+            "リチウム電池入り",
+            "磁石入り",
+            "中古で臭い、汚れ、シミ、カビ、虫食いがある",
+        ],
+        "yellow": [
+            "素材表示がない",
+            "「天然素材」「自然素材」とだけ書かれている",
+            "絹、ウール、革風、木製風など、素材が曖昧",
+            "和紙だが、植物片・押し花・金箔・装飾素材が混ざっていそう",
+            "布製品だが、中古・古布・着物リメイク品である",
+            "紙製品だが、紐・飾り・留め具などに木・竹・革風素材がある",
+            "匂い付き文具、香り付きカード、アロマ系雑貨",
+            "外箱に「natural」「wood」「bamboo」「leather」「plant」「seed」「dried flower」などの表記がある",
+        ],
+    },
+    {
+        "title": "店頭で見える配送・検疫リスク",
+        "red": [
+            "片手で持って明らかに重い",
+            "外箱が大きく、梱包後2kg以内に収まるか怪しい",
+            "ガラス、陶器、鏡、薄いプラスチックなど壊れやすい",
+            "液漏れ、粉漏れ、破裂、変形の可能性がある",
+            "箱が潰れている、開封済み、テープ跡がある",
+            "正確な英語品名を書けない",
+            "素材を英語で説明できない",
+            "商品の中身が外から判断できない",
+            "セット内容が多く、検品漏れが起きそう",
+            "鋭利な金属、刃物、工具、針状パーツがある",
+        ],
+        "yellow": [
+            "梱包すると厚み・重さがかなり増えそう",
+            "外箱を守るために大きめの段ボールが必要そう",
+            "角潰れ・箱潰れでクレームになりそう",
+            "追跡のみで補償なし配送だと不安な価格の商品",
+            "中身の説明に専門用語が必要",
+            "パーツ数が多く、欠品確認が面倒",
+            "説明書や表示が日本語だけで、海外購入者が誤解しそう",
+            "オーストラリア向けで、植物・動物・木竹素材に少しでも見える",
+            "アメリカ向けで、食品・液体・電池・電子部品に少しでも見える",
+        ],
+    },
+]
+
+COUNTRY_RISK_NOTES = {
+    COUNTRY_AU: "オーストラリア向け補足：食品、植物、種、木、竹、藁、革、羽、骨、貝殻などに見える素材は初心者は仕入れない。素材が紙・綿・プラスチック・金属とはっきり分かる軽量品を優先する。",
+    COUNTRY_US: "アメリカ向け補足：食品、液体、スプレー、香水、電池入り、電子部品入り、大きい商品、重い商品は初心者は仕入れない。まずは紙・文房具・軽量雑貨など、品名と素材を簡単に説明できる商品を優先する。",
+}
 
 
 st.set_page_config(
@@ -83,6 +172,8 @@ def apply_mobile_css() -> None:
         }
         .summary-label { color: #666; font-size: 0.85rem; margin-bottom: 0.15rem; }
         .summary-value { font-size: 1.35rem; font-weight: 800; line-height: 1.25; }
+        .risk-guide ul { margin: 0.35rem 0 0 1.1rem; padding: 0; }
+        .risk-guide li { margin: 0.28rem 0; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -99,6 +190,47 @@ def pct(value: Any) -> str:
     if value is None:
         return "-"
     return f"{to_float(value):.1f}%"
+
+
+def guide_box(label: str, items: list[str], css_class: str) -> None:
+    bullet_items = "".join(f"<li>{escape(item)}</li>" for item in items)
+    st.markdown(
+        f"""
+        <div class="risk-guide {css_class}">
+            <strong>{escape(label)}</strong>
+            <ul>{bullet_items}</ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_store_check_guide(country: str) -> None:
+    st.caption("リスクガイドは閲覧専用です。利益計算やA/B/C/D判定には使いません。")
+    for section in RISK_GUIDE_SECTIONS:
+        with st.expander(section["title"], expanded=False):
+            guide_box("赤信号：原則仕入れない", section["red"], "danger")
+            guide_box("黄信号：その場では保留", section["yellow"], "warn")
+            if section.get("note"):
+                st.info(section["note"])
+            if section["title"] == "店頭で見える配送・検疫リスク":
+                st.info(COUNTRY_RISK_NOTES.get(country, COUNTRY_RISK_NOTES[COUNTRY_AU]))
+
+
+def risk_guide_prompt_text(country: str) -> str:
+    lines = [STORE_CHECK_NOTICE, ""]
+    for section in RISK_GUIDE_SECTIONS:
+        lines.append(f"■ {section['title']}")
+        lines.append("赤信号：原則仕入れない")
+        lines.extend(f"- {item}" for item in section["red"])
+        lines.append("黄信号：その場では保留")
+        lines.extend(f"- {item}" for item in section["yellow"])
+        if section.get("note"):
+            lines.append(f"補足: {section['note']}")
+        if section["title"] == "店頭で見える配送・検疫リスク":
+            lines.append(f"販売国別補足: {COUNTRY_RISK_NOTES.get(country, COUNTRY_RISK_NOTES[COUNTRY_AU])}")
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 def normalize_fee_setting(row: dict[str, Any] | None, country: str) -> dict[str, Any]:
@@ -269,9 +401,6 @@ def candidate_meta(row: dict[str, Any] | None) -> dict[str, Any]:
             meta["expected_sale_price_usd"] = to_float(row.get("expected_sale_price")) if sale_currency == "USD" else 0.0
     meta.setdefault("expected_sale_price_aud", 0.0)
     meta.setdefault("expected_sale_price_usd", 0.0)
-    meta.setdefault("rights_brand_risk", "")
-    meta.setdefault("material_risk", "")
-    meta.setdefault("shipping_quarantine_risk", "")
     meta.setdefault("deleted", False)
     return meta
 
@@ -360,9 +489,6 @@ def values_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "packaging_cost_jpy": to_int(row.get("packaging_cost_jpy"), DEFAULT_PACKAGING_COST_JPY),
         "expected_sale_price_aud": to_float(meta.get("expected_sale_price_aud")),
         "expected_sale_price_usd": to_float(meta.get("expected_sale_price_usd")),
-        "rights_brand_risk": str(meta.get("rights_brand_risk") or ""),
-        "material_risk": str(meta.get("material_risk") or ""),
-        "shipping_quarantine_risk": str(meta.get("shipping_quarantine_risk") or ""),
         "memo": row.get("memo", "") or "",
     }
 
@@ -371,9 +497,6 @@ def meta_from_values(values: dict[str, Any], comparison: dict[str, Any], deleted
     return {
         "expected_sale_price_aud": to_float(values.get("expected_sale_price_aud")),
         "expected_sale_price_usd": to_float(values.get("expected_sale_price_usd")),
-        "rights_brand_risk": str(values.get("rights_brand_risk") or ""),
-        "material_risk": str(values.get("material_risk") or ""),
-        "shipping_quarantine_risk": str(values.get("shipping_quarantine_risk") or ""),
         "recommended_label": comparison.get("recommended_label"),
         "au_profit_jpy": comparison["au"].get("expected_profit_jpy"),
         "us_profit_jpy": comparison["us"].get("expected_profit_jpy"),
@@ -426,7 +549,7 @@ def show_comparison_details(comparison: dict[str, Any]) -> None:
         show_result_card(comparison["us"])
 
 
-def build_comparison_prompt(values: dict[str, Any], comparison: dict[str, Any]) -> str:
+def build_comparison_prompt(values: dict[str, Any], comparison: dict[str, Any], country: str) -> str:
     return f"""以下の商品を、eBay輸出初心者が少量仕入れしてよいか、利益・リスク・販売国の観点から厳しく判定してください。
 
 商品情報:
@@ -447,11 +570,11 @@ def build_comparison_prompt(values: dict[str, Any], comparison: dict[str, Any]) 
 - 推奨販売国: {comparison.get("recommended_label") or "-"}
 - 利益差: {yen(comparison.get("profit_difference"))}
 
-補足リスク:
-- 権利・ブランドリスク: {values.get("rights_brand_risk") or "未記入"}
-- 素材リスク: {values.get("material_risk") or "未記入"}
-- 配送・検疫リスク: {values.get("shipping_quarantine_risk") or "未記入"}
-- メモ: {values.get("memo") or "未記入"}
+店頭リスク確認ガイド:
+{risk_guide_prompt_text(country)}
+
+メモ:
+{values.get("memo") or "未記入"}
 
 依頼:
 この商品を初心者が少量仕入れしてよいか、利益・リスク・販売国の観点から厳しく判定してください。見送るべき条件と、確認すべき公式情報も具体的に挙げてください。
@@ -472,9 +595,6 @@ def render_candidate_form(
         "packaging_cost_jpy": to_int(st.session_state.get("default_packaging_cost_jpy"), DEFAULT_PACKAGING_COST_JPY),
         "expected_sale_price_aud": 0.0,
         "expected_sale_price_usd": 0.0,
-        "rights_brand_risk": "",
-        "material_risk": "",
-        "shipping_quarantine_risk": "",
         "memo": "",
     }
 
@@ -485,9 +605,6 @@ def render_candidate_form(
     expected_sale_price_aud = st.number_input("想定販売価格 AUD", min_value=0.0, step=1.0, value=to_float(base["expected_sale_price_aud"]), key=f"{key_prefix}_aud")
     expected_sale_price_usd = st.number_input("想定販売価格 USD", min_value=0.0, step=1.0, value=to_float(base["expected_sale_price_usd"]), key=f"{key_prefix}_usd")
     packaging_cost_jpy = st.number_input("梱包費（円）", min_value=0, step=50, value=to_int(base["packaging_cost_jpy"], DEFAULT_PACKAGING_COST_JPY), key=f"{key_prefix}_packaging")
-    rights_brand_risk = st.text_area("権利・ブランドリスク", value=base["rights_brand_risk"], key=f"{key_prefix}_rights")
-    material_risk = st.text_area("素材リスク", value=base["material_risk"], key=f"{key_prefix}_material")
-    shipping_quarantine_risk = st.text_area("配送・検疫リスク", value=base["shipping_quarantine_risk"], key=f"{key_prefix}_shipping_risk")
     memo = st.text_area("メモ", value=base["memo"], key=f"{key_prefix}_memo")
 
     values = {
@@ -497,9 +614,6 @@ def render_candidate_form(
         "packaging_cost_jpy": packaging_cost_jpy,
         "expected_sale_price_aud": expected_sale_price_aud,
         "expected_sale_price_usd": expected_sale_price_usd,
-        "rights_brand_risk": rights_brand_risk,
-        "material_risk": material_risk,
-        "shipping_quarantine_risk": shipping_quarantine_risk,
         "memo": memo,
     }
     comparison = calculate_country_comparison(values, contexts)
@@ -523,9 +637,11 @@ def render_candidate_form(
             st.rerun()
 
 
-def product_judgment_page(client: Any | None, contexts: dict[str, dict[str, Any]]) -> None:
+def product_judgment_page(client: Any | None, contexts: dict[str, dict[str, Any]], country: str) -> None:
     st.header("商品判定")
     st.caption("1つの商品で、オーストラリア向けとアメリカ向けの利益を同時に比較します。")
+    st.warning(STORE_CHECK_NOTICE)
+    render_store_check_guide(country)
     render_candidate_form(client, contexts, key_prefix="new")
 
 
@@ -534,17 +650,15 @@ def card_updated_label(row: dict[str, Any]) -> str:
     return str(value).split("T")[0] if value else "-"
 
 
-def render_candidate_detail(row: dict[str, Any], values: dict[str, Any], comparison: dict[str, Any]) -> None:
+def render_candidate_detail(row: dict[str, Any], values: dict[str, Any], comparison: dict[str, Any], country: str) -> None:
     show_comparison_summary(comparison)
     st.markdown("#### 補足メモ")
-    st.write(f"権利・ブランドリスク: {values.get('rights_brand_risk') or '未記入'}")
-    st.write(f"素材リスク: {values.get('material_risk') or '未記入'}")
-    st.write(f"配送・検疫リスク: {values.get('shipping_quarantine_risk') or '未記入'}")
     st.write(f"メモ: {values.get('memo') or '未記入'}")
+    render_store_check_guide(country)
     show_comparison_details(comparison)
 
 
-def products_page(client: Any | None, contexts: dict[str, dict[str, Any]]) -> None:
+def products_page(client: Any | None, contexts: dict[str, dict[str, Any]], country: str) -> None:
     st.header("候補一覧")
     products = visible_products(client)
     if not products:
@@ -587,9 +701,9 @@ def products_page(client: Any | None, contexts: dict[str, dict[str, Any]]) -> No
         st.markdown("</div>", unsafe_allow_html=True)
 
         if st.session_state.get("detail_candidate_id") == row_id:
-            render_candidate_detail(row, values, comparison)
+            render_candidate_detail(row, values, comparison, country)
         if st.session_state.get("prompt_candidate_id") == row_id:
-            st.text_area("コピー用プロンプト", value=build_comparison_prompt(values, comparison), height=420, key=f"prompt_text_{row_id}")
+            st.text_area("コピー用プロンプト", value=build_comparison_prompt(values, comparison, country), height=420, key=f"prompt_text_{row_id}")
         if st.session_state.get("delete_candidate_id") == row_id:
             st.warning("この候補を削除しますか？")
             dcol1, dcol2 = st.columns(2)
@@ -826,9 +940,9 @@ def main() -> None:
     )
 
     if page == "商品判定":
-        product_judgment_page(client, contexts)
+        product_judgment_page(client, contexts, country)
     elif page == "候補一覧":
-        products_page(client, contexts)
+        products_page(client, contexts, country)
     elif page == "設定":
         settings_page(client, country, contexts)
 
